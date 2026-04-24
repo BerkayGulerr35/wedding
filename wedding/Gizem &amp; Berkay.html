@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Gizem &amp; Berkay — Anılarımız</title>
+
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,500;0,600;1,300;1,400;1,500&family=Cormorant+Infant:ital,wght@0,400;0,500;1,400;1,500&family=Inter:wght@300;400;500;600&family=Caveat:wght@400;500&family=JetBrains+Mono:wght@300;400&display=swap" rel="stylesheet" />
+
+<link rel="stylesheet" href="styles.css" />
+
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
+
+<style>
+  html, body { background: #2a1f14; }
+  body { margin: 0; }
+</style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel" src="ios-frame.jsx"></script>
+  <script type="text/babel" src="design-canvas.jsx"></script>
+  <script type="text/babel" src="tweaks-panel.jsx"></script>
+  <script type="text/babel" src="botanicals.jsx"></script>
+  <script type="text/babel" src="fairy-lights.jsx"></script>
+  <script type="text/babel" src="screen-1-hero.jsx"></script>
+  <script type="text/babel" src="screen-2-upload.jsx"></script>
+  <script type="text/babel" src="screen-3-thanks.jsx"></script>
+  <script type="text/babel" src="screen-4-5-admin.jsx"></script>
+
+  <script type="text/babel">
+    const { useState, useEffect } = React;
+
+    const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
+      "lightDensity": 1.0,
+      "lightIntensity": 1.0,
+      "showSwags": true,
+      "fontPair": "cormorant-inter"
+    }/*EDITMODE-END*/;
+
+    function PhoneFrame({ children }) {
+      // Slimmer iOS-ish frame, fits inside artboard nicely
+      return (
+        <div style={{
+          width: 410, height: 860, borderRadius: 50, overflow: 'hidden',
+          position: 'relative',
+          background: '#0a0805',
+          boxShadow:
+            '0 50px 100px -30px rgba(20,12,4,0.65), 0 0 0 12px #14100a, 0 0 0 13px #2a1f14, 0 0 0 14px rgba(232,194,119,0.25)',
+        }}>
+          {/* status bar bg-aware */}
+          <div style={{
+            position: 'absolute', top: 0, left: 0, right: 0, zIndex: 50,
+            height: 50, padding: '14px 26px 0',
+            display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+            color: '#fbeec8', fontFamily: 'Inter, system-ui', fontWeight: 600, fontSize: 15,
+            pointerEvents: 'none',
+          }}>
+            <span style={{ textShadow: '0 1px 4px rgba(0,0,0,0.5)' }}>9:41</span>
+            <span style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
+              <svg width="17" height="11" viewBox="0 0 17 11"><rect x="0" y="6" width="3" height="5" rx="0.7" fill="#fbeec8"/><rect x="4.5" y="4" width="3" height="7" rx="0.7" fill="#fbeec8"/><rect x="9" y="2" width="3" height="9" rx="0.7" fill="#fbeec8"/><rect x="13.5" y="0" width="3" height="11" rx="0.7" fill="#fbeec8"/></svg>
+              <svg width="24" height="11" viewBox="0 0 24 11"><rect x="0.5" y="0.5" width="20" height="10" rx="3" stroke="#fbeec8" strokeOpacity="0.5" fill="none"/><rect x="2" y="2" width="17" height="7" rx="1.5" fill="#fbeec8"/><rect x="21.5" y="3.5" width="1.5" height="4" rx="0.5" fill="#fbeec8" opacity="0.5"/></svg>
+            </span>
+          </div>
+          {/* dynamic island */}
+          <div style={{
+            position: 'absolute', top: 10, left: '50%', transform: 'translateX(-50%)',
+            width: 120, height: 34, borderRadius: 22, background: '#000', zIndex: 60,
+          }} />
+          {/* content */}
+          <div style={{ position: 'absolute', inset: 0 }}>
+            {children}
+          </div>
+          {/* home indicator */}
+          <div style={{
+            position: 'absolute', bottom: 8, left: '50%', transform: 'translateX(-50%)',
+            width: 130, height: 5, borderRadius: 100, background: 'rgba(251,238,200,0.65)', zIndex: 80,
+          }} />
+        </div>
+      );
+    }
+
+    function App() {
+      const [tweaks, setTweaks] = useTweaks(TWEAK_DEFAULTS);
+
+      const screens = [
+        { id: 'hero',     label: '01 · Hoş geldin',        Comp: window.Screen1_Hero },
+        { id: 'upload',   label: '02 · Anılarını paylaş',  Comp: window.Screen2_Upload },
+        { id: 'thanks',   label: '03 · Teşekkürler',       Comp: window.Screen3_Thanks },
+        { id: 'admin',    label: '04 · Admin · Giriş',     Comp: window.Screen4_AdminLogin },
+        { id: 'gallery',  label: '05 · Admin · Galeri',    Comp: window.Screen5_AdminGallery },
+      ];
+
+      // Inject tweak globals so screens read them via window
+      useEffect(() => {
+        window.__TWEAKS__ = tweaks;
+      }, [tweaks]);
+
+      return (
+        <>
+          <DesignCanvas
+            title="Gizem & Berkay"
+            subtitle="Bizimle bu anıları paylaş — iPhone mockup, 5 ekran"
+            background="#1a1208"
+          >
+            <DCSection id="flow" title="Misafir Akışı">
+              {screens.slice(0, 3).map((s) => (
+                <DCArtboard key={s.id} id={s.id} label={s.label} width={460} height={920}>
+                  <div data-screen-label={s.label} style={{
+                    width: '100%', height: '100%',
+                    display: 'grid', placeItems: 'center',
+                    background: 'radial-gradient(ellipse at center, #2a1f14, #14100a)',
+                  }}>
+                    <PhoneFrame>
+                      <s.Comp />
+                    </PhoneFrame>
+                  </div>
+                </DCArtboard>
+              ))}
+            </DCSection>
+
+            <DCSection id="admin-section" title="Admin Paneli">
+              {screens.slice(3).map((s) => (
+                <DCArtboard key={s.id} id={s.id} label={s.label} width={460} height={920}>
+                  <div data-screen-label={s.label} style={{
+                    width: '100%', height: '100%',
+                    display: 'grid', placeItems: 'center',
+                    background: 'radial-gradient(ellipse at center, #2a1f14, #14100a)',
+                  }}>
+                    <PhoneFrame>
+                      <s.Comp />
+                    </PhoneFrame>
+                  </div>
+                </DCArtboard>
+              ))}
+            </DCSection>
+          </DesignCanvas>
+
+          <TweaksPanel title="Tweaks">
+            <TweakSection title="Atmosfer">
+              <TweakSlider label="Işık yoğunluğu" tweakKey="lightIntensity" tweaks={tweaks} setTweaks={setTweaks} min={0.4} max={1.6} step={0.05} />
+              <TweakSlider label="Işık adedi" tweakKey="lightDensity" tweaks={tweaks} setTweaks={setTweaks} min={0.4} max={1.8} step={0.05} />
+              <TweakToggle label="String light swag göster" tweakKey="showSwags" tweaks={tweaks} setTweaks={setTweaks} />
+            </TweakSection>
+          </TweaksPanel>
+        </>
+      );
+    }
+
+    function waitForGlobals(names, cb) {
+      const ok = names.every(n => window[n]);
+      if (ok) cb();
+      else setTimeout(() => waitForGlobals(names, cb), 50);
+    }
+
+    waitForGlobals(['DesignCanvas','DCSection','DCArtboard','TweaksPanel','TweakSection','TweakSlider','TweakToggle','useTweaks','Screen1_Hero','Screen2_Upload','Screen3_Thanks','Screen4_AdminLogin','Screen5_AdminGallery','FairyLightsScene','THREE'], () => {
+      ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+    });
+  </script>
+</body>
+</html>
