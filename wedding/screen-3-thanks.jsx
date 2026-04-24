@@ -42,7 +42,7 @@ const Screen3_Thanks = () => (
         textShadow: '0 2px 20px rgba(217,164,65,0.4)',
         marginBottom: 16,
       }}>
-        Bu güzel anı için<br/>sana minnettarız
+        Bu güzel anı için<br/>sana teşekkür ederiz
       </div>
       <div className="serif" style={{ fontSize: 16, color: '#e8c277', fontStyle: 'italic', opacity: 0.9, lineHeight: 1.6 }}>
         Paylaştığın her kare<br/>bizim için çok kıymetli

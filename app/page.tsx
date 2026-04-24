@@ -407,7 +407,7 @@ function ThanksScreen({ count, onReset }: { count: number; onReset: () => void }
           textShadow: '0 2px 20px rgba(217,164,65,0.4)',
           marginBottom: 16, animationDelay: '0.15s',
         }}>
-          Bu güzel anı için<br/>sana minnettarız
+          Bu güzel anı için<br/>sana teşekkür ederiz
         </h2>
 
         <p className="serif fade-in" style={{ fontSize: 16, color: '#e8c277', fontStyle: 'italic', lineHeight: 1.65, opacity: 0.9, animationDelay: '0.2s' }}>
