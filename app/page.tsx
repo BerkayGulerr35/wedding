@@ -9,7 +9,41 @@ import {
   Monogram,
   HeartScribble,
 } from '@/components/BotanicalElements';
-import { supabase } from '@/lib/supabase';
+
+// Upload one file to our own server (which saves it to disk + mirrors to R2).
+// Raw file goes in the request body; metadata travels in headers so the body
+// can be streamed straight to disk without buffering huge videos.
+function uploadFile(
+  file: File,
+  meta: { name: string; note: string },
+  onProgress: (pct: number) => void,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', '/api/upload');
+    xhr.setRequestHeader('x-original-name', encodeURIComponent(file.name));
+    xhr.setRequestHeader('x-mime', file.type || 'application/octet-stream');
+    if (meta.name) xhr.setRequestHeader('x-guest-name', encodeURIComponent(meta.name));
+    if (meta.note) xhr.setRequestHeader('x-guest-note', encodeURIComponent(meta.note));
+
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable) onProgress(Math.round((e.loaded / e.total) * 100));
+    };
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try {
+          const res = JSON.parse(xhr.responseText);
+          if (res.ok) return resolve();
+        } catch {
+          /* fall through */
+        }
+      }
+      reject(new Error(`upload-failed-${xhr.status}`));
+    };
+    xhr.onerror = () => reject(new Error('network-error'));
+    xhr.send(file);
+  });
+}
 
 const FairyLightsBackground = dynamic(() => import('@/components/FairyLightsBackground'), { ssr: false });
 
@@ -84,40 +118,21 @@ export default function Home() {
     let successCount = 0;
 
     for (const item of pendingFiles) {
-      setFiles(prev => prev.map(f => f.id === item.id ? { ...f, status: 'uploading' } : f));
+      setFiles(prev => prev.map(f => f.id === item.id ? { ...f, status: 'uploading', progress: 0 } : f));
 
-      const ext  = item.file.name.split('.').pop() ?? 'bin';
-      const path = `${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`;
-
-      // Animate progress
-      const interval = setInterval(() => {
-        setFiles(prev => prev.map(f => {
-          if (f.id === item.id && f.progress < 88) {
-            return { ...f, progress: Math.min(88, f.progress + Math.random() * 18) };
-          }
-          return f;
-        }));
-      }, 350);
-
-      const { data, error } = await supabase.storage
-        .from('wedding-uploads')
-        .upload(path, item.file, { cacheControl: '3600', upsert: false });
-
-      clearInterval(interval);
-
-      if (error || !data) {
+      try {
+        await uploadFile(
+          item.file,
+          { name: name.trim(), note: note.trim() },
+          (pct) => {
+            setFiles(prev => prev.map(f => f.id === item.id ? { ...f, progress: pct } : f));
+          },
+        );
+        setFiles(prev => prev.map(f => f.id === item.id ? { ...f, status: 'done', progress: 100 } : f));
+        successCount++;
+      } catch {
         setFiles(prev => prev.map(f => f.id === item.id ? { ...f, status: 'error', progress: 0 } : f));
-        continue;
       }
-
-      await supabase.from('uploads').insert({
-        name:     name.trim() || null,
-        note:     note.trim() || null,
-        file_url: data.path,
-      });
-
-      setFiles(prev => prev.map(f => f.id === item.id ? { ...f, status: 'done', progress: 100 } : f));
-      successCount++;
     }
 
     setIsSubmitting(false);

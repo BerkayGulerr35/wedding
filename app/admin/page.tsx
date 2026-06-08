@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useRef } from 'react';
 import dynamic from 'next/dynamic';
-import { supabase, type Upload } from '@/lib/supabase';
+import type { UploadMeta } from '@/lib/types';
 import { StringLightSwag, EucalyptusSprig, Monogram, OliveBranch } from '@/components/BotanicalElements';
 
 const FairyLightsBackground = dynamic(() => import('@/components/FairyLightsBackground'), { ssr: false });
@@ -23,9 +23,11 @@ const GRAIN_OVERLAY = {
 
 const ADMIN_PASSWORD = 'gizobekoevlendi';
 
-interface UploadWithSignedUrl extends Upload {
-  signedUrl?: string;
+interface UploadWithSignedUrl extends UploadMeta {
   isImage: boolean;
+  /** Media URL on our own server (token-authenticated). */
+  url: string;
+  /** Filename shown in the UI. */
   displayName: string;
 }
 
@@ -133,39 +135,32 @@ function Gallery({ onLogout }: { onLogout: () => void }) {
 
   const fetchUploads = async () => {
     setLoading(true);
-    const { data, error } = await supabase
-      .from('uploads')
-      .select('*')
-      .order('created_at', { ascending: false });
+    try {
+      const res = await fetch('/api/admin/list', {
+        headers: { 'x-admin-password': ADMIN_PASSWORD },
+      });
+      if (!res.ok) { setLoading(false); return; }
 
-    if (error || !data) { setLoading(false); return; }
+      const { token, uploads: items } = (await res.json()) as {
+        token: string;
+        uploads: (UploadMeta & { isImage: boolean })[];
+      };
 
-    const withUrls: UploadWithSignedUrl[] = await Promise.all(
-      (data as Upload[]).map(async (u) => {
-        const ext = u.file_url.split('.').pop()?.toLowerCase() ?? '';
-        const isImage = ['jpg','jpeg','png','gif','webp','heic','heif','avif','bmp'].includes(ext);
-        const displayName = u.file_url.split('/').pop()?.replace(/^\d+-[a-z0-9]+-/, '') ?? u.file_url;
+      const withUrls: UploadWithSignedUrl[] = items.map((u) => ({
+        ...u,
+        url: `/api/admin/file/${encodeURIComponent(u.storedName)}?t=${token}`,
+        displayName: u.originalName,
+      }));
 
-        const { data: signed } = await supabase.storage
-          .from('wedding-uploads')
-          .createSignedUrl(u.file_url, 3600);
-
-        return { ...u, signedUrl: signed?.signedUrl, isImage, displayName };
-      })
-    );
-
-    setUploads(withUrls);
-    setLoading(false);
+      setUploads(withUrls);
+    } finally {
+      setLoading(false);
+    }
   };
 
-  const downloadFile = async (upload: UploadWithSignedUrl) => {
-    const { data: signed } = await supabase.storage
-      .from('wedding-uploads')
-      .createSignedUrl(upload.file_url, 300);
-    if (!signed?.signedUrl) return;
-
+  const downloadFile = (upload: UploadWithSignedUrl) => {
     const a = document.createElement('a');
-    a.href = signed.signedUrl;
+    a.href = `${upload.url}&download=1`;
     a.download = upload.displayName;
     a.click();
   };
@@ -178,11 +173,8 @@ function Gallery({ onLogout }: { onLogout: () => void }) {
 
       await Promise.all(
         uploads.map(async (u) => {
-          const { data: signed } = await supabase.storage
-            .from('wedding-uploads')
-            .createSignedUrl(u.file_url, 120);
-          if (!signed?.signedUrl) return;
-          const res = await fetch(signed.signedUrl);
+          const res = await fetch(u.url);
+          if (!res.ok) return;
           const blob = await res.blob();
           zip.file(u.displayName, blob);
         })
@@ -339,22 +331,22 @@ function GalleryItem({
   onOpen: () => void;
   onDownload: () => void;
 }) {
-  const date = new Date(upload.created_at);
+  const date = new Date(upload.createdAt);
   const timeAgo = formatTimeAgo(date);
 
   return (
     <div className="gallery-item" onClick={onOpen}>
       {/* Media preview */}
-      {upload.signedUrl && upload.isImage ? (
+      {upload.url && upload.isImage ? (
         <img
-          src={upload.signedUrl}
+          src={upload.url}
           alt={upload.name || 'Anı'}
           style={{ width: '100%', height: '100%', objectFit: 'cover' }}
           loading="lazy"
         />
-      ) : upload.signedUrl && !upload.isImage ? (
+      ) : upload.url && !upload.isImage ? (
         <video
-          src={upload.signedUrl}
+          src={upload.url}
           style={{ width: '100%', height: '100%', objectFit: 'cover' }}
           muted
           preload="metadata"
@@ -406,7 +398,7 @@ function Lightbox({
   onClose: () => void;
   onDownload: () => void;
 }) {
-  const date = new Date(upload.created_at);
+  const date = new Date(upload.createdAt);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
@@ -425,10 +417,10 @@ function Lightbox({
       >
         {/* Media */}
         <div style={{ borderRadius: 6, overflow: 'hidden', background: '#1a1208', maxHeight: '60vh', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-          {upload.signedUrl && upload.isImage ? (
-            <img src={upload.signedUrl} alt="" style={{ maxWidth: '100%', maxHeight: '60vh', objectFit: 'contain', display: 'block' }} />
-          ) : upload.signedUrl ? (
-            <video src={upload.signedUrl} controls style={{ maxWidth: '100%', maxHeight: '60vh' }} />
+          {upload.url && upload.isImage ? (
+            <img src={upload.url} alt="" style={{ maxWidth: '100%', maxHeight: '60vh', objectFit: 'contain', display: 'block' }} />
+          ) : upload.url ? (
+            <video src={upload.url} controls style={{ maxWidth: '100%', maxHeight: '60vh' }} />
           ) : null}
         </div>
 

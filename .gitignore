@@ -26,3 +26,6 @@
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# guest uploads (saved to local disk at runtime)
+/uploads
