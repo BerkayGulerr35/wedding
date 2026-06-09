@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { listUploads, checkPassword, makeToken, isImageName } from '@/lib/storage';
+import { listUploads, checkPassword, makeToken } from '@/lib/storage';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -10,13 +10,8 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ ok: false, error: 'unauthorized' }, { status: 401 });
   }
 
-  const metas = await listUploads();
+  const uploads = await listUploads();
   const token = makeToken();
-
-  const uploads = metas.map((m) => ({
-    ...m,
-    isImage: isImageName(m.storedName),
-  }));
 
   return NextResponse.json({ ok: true, token, uploads });
 }

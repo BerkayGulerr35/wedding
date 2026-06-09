@@ -14,22 +14,27 @@
 import 'server-only';
 
 import { createWriteStream, createReadStream } from 'node:fs';
-import { mkdir, writeFile, readFile, readdir, stat } from 'node:fs/promises';
+import { mkdir, writeFile, readdir, stat, rename, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { randomBytes, createHmac, timingSafeEqual } from 'node:crypto';
 
-import { S3Client, GetObjectCommand } from '@aws-sdk/client-s3';
+import { S3Client, GetObjectCommand, ListObjectsV2Command } from '@aws-sdk/client-s3';
 import { Upload } from '@aws-sdk/lib-storage';
 
-import type { UploadMeta } from './types';
+import type { UploadMeta, AdminItem } from './types';
 
 // ─── Config ───────────────────────────────────────────────
 export const UPLOAD_DIR =
   process.env.UPLOAD_DIR && process.env.UPLOAD_DIR.trim()
     ? process.env.UPLOAD_DIR.trim()
     : join(process.cwd(), 'uploads');
+
+// Incoming uploads are staged here first so we can try R2 and still fall back
+// to permanent local storage if R2 fails. Same filesystem as UPLOAD_DIR, so
+// promoting a staged file to permanent is an atomic rename.
+const TMP_DIR = join(UPLOAD_DIR, '.tmp');
 
 export const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD ?? 'gizobekoevlendi';
 
@@ -125,7 +130,8 @@ export interface SaveInput {
 
 export interface SaveResult {
   meta: UploadMeta;
-  diskOk: true; // we only return on disk success; otherwise we throw
+  /** Where the media ended up. */
+  storedIn: 'r2' | 'disk';
   r2Ok: boolean;
   r2Error?: string;
 }
@@ -135,21 +141,32 @@ async function ensureDir() {
 }
 
 /**
- * Stream an upload to disk (required), then mirror to R2 (best-effort).
- * Throws if the disk write fails. R2 failures are reported, not thrown.
+ * Save an upload, R2 first, local disk as fallback.
+ *
+ *   1. Stage the request body to a temp file (so the stream can be replayed).
+ *   2. Try Cloudflare R2. On success the media lives ONLY in R2 and the temp
+ *      file is discarded.
+ *   3. If R2 fails (or isn't configured), promote the temp file to permanent
+ *      local storage instead.
+ *   4. Always write the metadata sidecar to local disk so the admin gallery
+ *      can list every upload regardless of where the media lives.
+ *
+ * Throws only if BOTH R2 and the local fallback fail.
  */
 export async function saveUpload(input: SaveInput): Promise<SaveResult> {
+  if (!input.body) throw new Error('empty-body');
   await ensureDir();
+  await mkdir(TMP_DIR, { recursive: true });
 
   const { id, storedName } = buildStoredName(input.originalName, input.name);
-  const filePath = join(UPLOAD_DIR, storedName);
+  const tmpPath = join(TMP_DIR, storedName);
+  const finalPath = join(UPLOAD_DIR, storedName);
 
-  // 1. Stream request body straight to disk (no buffering of the whole file).
-  if (!input.body) throw new Error('empty-body');
+  // 1. Stage to temp (no full-file buffering in memory).
   const nodeStream = Readable.fromWeb(input.body as any);
-  await pipeline(nodeStream, createWriteStream(filePath));
+  await pipeline(nodeStream, createWriteStream(tmpPath));
 
-  const { size } = await stat(filePath);
+  const { size } = await stat(tmpPath);
 
   const meta: UploadMeta = {
     id,
@@ -163,24 +180,53 @@ export async function saveUpload(input: SaveInput): Promise<SaveResult> {
     r2: false,
   };
 
-  // 2. Mirror media + sidecar to R2 (best-effort).
+  // 2. Try R2 first.
   let r2Ok = false;
   let r2Error: string | undefined;
   if (r2Configured) {
     try {
-      await uploadToR2(filePath, storedName, meta.mime);
-      await putR2Object(`${storedName}.json`, JSON.stringify({ ...meta, r2: true }), 'application/json');
+      await uploadToR2(tmpPath, storedName, meta.mime);
       r2Ok = true;
       meta.r2 = true;
     } catch (err) {
       r2Error = err instanceof Error ? err.message : String(err);
     }
+  } else {
+    r2Error = 'r2-not-configured';
   }
 
-  // 3. Write the sidecar to disk last, so it reflects the final r2 status.
-  await writeFile(join(UPLOAD_DIR, `${storedName}.json`), JSON.stringify(meta, null, 2), 'utf8');
+  const sidecar = JSON.stringify(meta, null, 2);
+  const localSidecar = join(UPLOAD_DIR, `${storedName}.json`);
 
-  return { meta, diskOk: true, r2Ok, r2Error };
+  // 3. Persist media + its .json sidecar. The sidecar always lives NEXT TO the
+  //    media: in R2 on success (nothing left on local disk), on local disk on
+  //    failure.
+  if (r2Ok) {
+    // Put the sidecar in R2 too so "who uploaded" travels with the file.
+    let sidecarInR2 = false;
+    try {
+      await putR2Object(`${storedName}.json`, sidecar, 'application/json');
+      sidecarInR2 = true;
+    } catch {
+      /* fall back to a local sidecar below so metadata isn't lost */
+    }
+    await unlink(tmpPath).catch(() => {});
+    // Safety net: if even the tiny sidecar couldn't reach R2, keep it locally.
+    if (!sidecarInR2) await writeFile(localSidecar, sidecar, 'utf8');
+  } else {
+    // R2 failed → keep BOTH media and sidecar on local disk.
+    try {
+      await rename(tmpPath, finalPath);
+    } catch (err) {
+      await unlink(tmpPath).catch(() => {});
+      throw new Error(
+        `persist-failed (r2: ${r2Error ?? 'n/a'}) (disk: ${err instanceof Error ? err.message : String(err)})`,
+      );
+    }
+    await writeFile(localSidecar, sidecar, 'utf8');
+  }
+
+  return { meta, storedIn: r2Ok ? 'r2' : 'disk', r2Ok, r2Error };
 }
 
 async function uploadToR2(filePath: string, key: string, contentType: string) {
@@ -208,24 +254,79 @@ async function putR2Object(key: string, body: string, contentType: string) {
 
 // ─── Read path (admin) ────────────────────────────────────
 
-/** List all uploads by reading the sidecar JSON files on disk. */
-export async function listUploads(): Promise<UploadMeta[]> {
-  await ensureDir();
-  const entries = await readdir(UPLOAD_DIR);
-  const sidecars = entries.filter((f) => f.endsWith('.json'));
+const EXT_MIME: Record<string, string> = {
+  jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif',
+  webp: 'image/webp', heic: 'image/heic', heif: 'image/heif', avif: 'image/avif',
+  bmp: 'image/bmp', tiff: 'image/tiff',
+  mp4: 'video/mp4', mov: 'video/quicktime', m4v: 'video/x-m4v', webm: 'video/webm',
+  avi: 'video/x-msvideo', mkv: 'video/x-matroska', '3gp': 'video/3gpp',
+};
 
-  const metas: UploadMeta[] = [];
-  for (const sc of sidecars) {
+/** Best-effort MIME from a filename extension (used when there's no sidecar). */
+export function guessMime(storedName: string): string {
+  const ext = storedName.split('.').pop()?.toLowerCase() ?? '';
+  return EXT_MIME[ext] ?? 'application/octet-stream';
+}
+
+/** Pull the guest name + timestamp back out of the stored filename. */
+function parseStoredName(storedName: string): { name: string | null; createdAt: string | null } {
+  const base = storedName.replace(/\.[^.]*$/, '');
+  const parts = base.split('__'); // [timestamp, name, originalBase, id]
+  let createdAt: string | null = null;
+  const m = /^(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})-(\d{2})$/.exec(parts[0] ?? '');
+  if (m) createdAt = `${m[1]}T${m[2]}:${m[3]}:${m[4]}Z`;
+  let name: string | null = parts.length >= 4 ? parts[1] : null;
+  if (!name || name === 'anonim') name = null;
+  return { name, createdAt };
+}
+
+function toAdminItem(storedName: string, lastModified?: Date): AdminItem {
+  const { name, createdAt } = parseStoredName(storedName);
+  return {
+    storedName,
+    isImage: isImageName(storedName),
+    name,
+    createdAt: createdAt ?? lastModified?.toISOString() ?? new Date(0).toISOString(),
+  };
+}
+
+/**
+ * List uploads for the admin gallery straight from the MEDIA files — no
+ * sidecar reads. Sources: R2 (successful uploads) + local disk (R2-failed
+ * fallbacks). Name/date come from the filename itself.
+ */
+export async function listUploads(): Promise<AdminItem[]> {
+  const items = new Map<string, AdminItem>();
+
+  // Local disk (R2-failed fallbacks).
+  await ensureDir();
+  for (const f of await readdir(UPLOAD_DIR)) {
+    if (f.startsWith('.') || f.endsWith('.json')) continue; // skip .tmp, sidecars
+    items.set(f, toAdminItem(f));
+  }
+
+  // R2 (successful uploads) — one paginated listing, no per-object fetch.
+  // If R2 is unreachable we still return the local items rather than failing.
+  if (r2Configured) {
     try {
-      const raw = await readFile(join(UPLOAD_DIR, sc), 'utf8');
-      metas.push(JSON.parse(raw) as UploadMeta);
+      let cursor: string | undefined;
+      do {
+        const res = await r2Client().send(
+          new ListObjectsV2Command({ Bucket: R2_BUCKET, ContinuationToken: cursor }),
+        );
+        for (const o of res.Contents ?? []) {
+          const key = o.Key ?? '';
+          if (!key || key.endsWith('.json')) continue;
+          if (!items.has(key)) items.set(key, toAdminItem(key, o.LastModified));
+        }
+        cursor = res.IsTruncated ? res.NextContinuationToken : undefined;
+      } while (cursor);
     } catch {
-      // skip corrupt sidecar
+      // R2 listing failed (creds/bucket/network) — show local items only.
     }
   }
 
-  metas.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1)); // newest first
-  return metas;
+  return [...items.values()].sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
 }
 
 /** Resolve a stored file path, guarding against path traversal. */
@@ -236,11 +337,28 @@ export function resolveStoredFile(storedName: string): string | null {
   return join(UPLOAD_DIR, storedName);
 }
 
-/** Stream a stored object back from R2 (fallback when disk copy is gone). */
-export async function getFromR2(key: string) {
+export interface R2Object {
+  body: Readable;
+  contentType?: string;
+  contentLength?: number;
+  contentRange?: string;
+  /** 206 when a Range was honoured, otherwise 200. */
+  status: number;
+}
+
+/** Stream a stored object back from R2, forwarding an optional Range header. */
+export async function getR2Object(key: string, range?: string | null): Promise<R2Object | null> {
   if (!r2Configured) return null;
-  const res = await r2Client().send(new GetObjectCommand({ Bucket: R2_BUCKET, Key: key }));
-  return res.Body as Readable | undefined;
+  const res = await r2Client().send(
+    new GetObjectCommand({ Bucket: R2_BUCKET, Key: key, Range: range || undefined }),
+  );
+  return {
+    body: res.Body as Readable,
+    contentType: res.ContentType,
+    contentLength: res.ContentLength,
+    contentRange: res.ContentRange,
+    status: range && res.ContentRange ? 206 : 200,
+  };
 }
 
 // ─── Admin auth token ─────────────────────────────────────

@@ -20,3 +20,16 @@ export interface UploadMeta {
   /** Whether the file was successfully mirrored to Cloudflare R2. */
   r2: boolean;
 }
+
+/**
+ * Lightweight entry for the admin gallery. Built straight from the media
+ * filename (no sidecar read) — so it has no free-text note.
+ */
+export interface AdminItem {
+  storedName: string;
+  isImage: boolean;
+  /** Guest name parsed from the filename (null if anonymous). */
+  name: string | null;
+  /** Upload time parsed from the filename. */
+  createdAt: string;
+}

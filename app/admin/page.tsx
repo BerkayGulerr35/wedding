@@ -1,8 +1,8 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect } from 'react';
 import dynamic from 'next/dynamic';
-import type { UploadMeta } from '@/lib/types';
+import type { AdminItem } from '@/lib/types';
 import { StringLightSwag, EucalyptusSprig, Monogram, OliveBranch } from '@/components/BotanicalElements';
 
 const FairyLightsBackground = dynamic(() => import('@/components/FairyLightsBackground'), { ssr: false });
@@ -21,13 +21,15 @@ const GRAIN_OVERLAY = {
   mixBlendMode: 'overlay' as const,
 };
 
-const ADMIN_PASSWORD = 'gizobekoevlendi';
+// The admin password lives only in the ADMIN_PASSWORD env var on the server.
+// After a successful server-validated login we keep whatever the user typed in
+// sessionStorage and send it on each API request.
+const PW_KEY = 'admin_pw';
 
-interface UploadWithSignedUrl extends UploadMeta {
-  isImage: boolean;
+interface UploadWithSignedUrl extends AdminItem {
   /** Media URL on our own server (token-authenticated). */
   url: string;
-  /** Filename shown in the UI. */
+  /** Filename used when downloading. */
   displayName: string;
 }
 
@@ -40,23 +42,41 @@ export default function AdminPage() {
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
-    if (sessionStorage.getItem('admin_authed') === '1') setAuthed(true);
+    if (sessionStorage.getItem(PW_KEY)) setAuthed(true);
   }, []);
 
-  const handleLogin = (e: React.FormEvent) => {
+  const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (password === ADMIN_PASSWORD) {
-      sessionStorage.setItem('admin_authed', '1');
-      setAuthed(true);
-    } else {
+    setLoading(true);
+    try {
+      const res = await fetch('/api/admin/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password }),
+      });
+      if (res.ok) {
+        sessionStorage.setItem(PW_KEY, password);
+        setAuthed(true);
+      } else {
+        setWrongPw(true);
+        setPassword('');
+        setTimeout(() => setWrongPw(false), 2500);
+      }
+    } catch {
       setWrongPw(true);
-      setPassword('');
       setTimeout(() => setWrongPw(false), 2500);
+    } finally {
+      setLoading(false);
     }
   };
 
+  const logout = () => {
+    sessionStorage.removeItem(PW_KEY);
+    setAuthed(false);
+  };
+
   if (!authed) return <LoginScreen onLogin={handleLogin} password={password} setPassword={setPassword} wrongPw={wrongPw} loading={loading} />;
-  return <Gallery onLogout={() => { sessionStorage.removeItem('admin_authed'); setAuthed(false); }} />;
+  return <Gallery onLogout={logout} />;
 }
 
 // ─── Login ───────────────────────────────────────────────
@@ -127,29 +147,30 @@ function Gallery({ onLogout }: { onLogout: () => void }) {
   const [loading, setLoading]   = useState(true);
   const [filter, setFilter]     = useState<Filter>('all');
   const [selected, setSelected] = useState<UploadWithSignedUrl | null>(null);
-  const [zipping, setZipping]   = useState(false);
 
   useEffect(() => {
     fetchUploads();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const fetchUploads = async () => {
     setLoading(true);
     try {
       const res = await fetch('/api/admin/list', {
-        headers: { 'x-admin-password': ADMIN_PASSWORD },
+        headers: { 'x-admin-password': sessionStorage.getItem(PW_KEY) ?? '' },
       });
+      if (res.status === 401) { onLogout(); return; }
       if (!res.ok) { setLoading(false); return; }
 
       const { token, uploads: items } = (await res.json()) as {
         token: string;
-        uploads: (UploadMeta & { isImage: boolean })[];
+        uploads: AdminItem[];
       };
 
       const withUrls: UploadWithSignedUrl[] = items.map((u) => ({
         ...u,
         url: `/api/admin/file/${encodeURIComponent(u.storedName)}?t=${token}`,
-        displayName: u.originalName,
+        displayName: u.storedName,
       }));
 
       setUploads(withUrls);
@@ -163,33 +184,6 @@ function Gallery({ onLogout }: { onLogout: () => void }) {
     a.href = `${upload.url}&download=1`;
     a.download = upload.displayName;
     a.click();
-  };
-
-  const bulkDownload = async () => {
-    setZipping(true);
-    try {
-      const JSZip = (await import('jszip')).default;
-      const zip = new JSZip();
-
-      await Promise.all(
-        uploads.map(async (u) => {
-          const res = await fetch(u.url);
-          if (!res.ok) return;
-          const blob = await res.blob();
-          zip.file(u.displayName, blob);
-        })
-      );
-
-      const zipBlob = await zip.generateAsync({ type: 'blob' });
-      const url = URL.createObjectURL(zipBlob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = 'gizem-berkay-anilari.zip';
-      a.click();
-      URL.revokeObjectURL(url);
-    } finally {
-      setZipping(false);
-    }
   };
 
   const filtered = uploads.filter(u => {
@@ -264,14 +258,6 @@ function Gallery({ onLogout }: { onLogout: () => void }) {
               ))}
             </div>
 
-            <button
-              onClick={bulkDownload}
-              disabled={zipping || uploads.length === 0}
-              className="btn btn-dark"
-              style={{ fontSize: 10, padding: '10px 16px', letterSpacing: '0.15em', gap: 6 }}
-            >
-              {zipping ? 'Hazırlanıyor...' : '↓ TÜMÜNÜ İNDİR (.zip)'}
-            </button>
           </div>
         </div>
       </div>
@@ -300,7 +286,7 @@ function Gallery({ onLogout }: { onLogout: () => void }) {
             <div className="gallery-grid">
               {filtered.map(u => (
                 <GalleryItem
-                  key={u.id}
+                  key={u.storedName}
                   upload={u}
                   onOpen={() => setSelected(u)}
                   onDownload={() => downloadFile(u)}
@@ -430,11 +416,6 @@ function Lightbox({
             <div className="serif-it" style={{ fontSize: 20, color: '#3a3022', fontStyle: 'italic', marginBottom: 6 }}>
               {upload.name || 'Anonim'}
             </div>
-            {upload.note && (
-              <div className="serif" style={{ fontSize: 14, color: '#5a4a35', fontStyle: 'italic', lineHeight: 1.55 }}>
-                &ldquo;{upload.note}&rdquo;
-              </div>
-            )}
             <div style={{ fontSize: 10, color: '#8a7656', marginTop: 8, letterSpacing: '0.12em' }}>
               {date.toLocaleDateString('tr-TR', { day: 'numeric', month: 'long', year: 'numeric', hour: '2-digit', minute: '2-digit' })}
             </div>
